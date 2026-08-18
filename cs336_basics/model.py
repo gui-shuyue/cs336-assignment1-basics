@@ -339,3 +339,202 @@ class RotaryPositionalEmbedding(nn.Module):
         x_rotated = self._rotate_pairs(x_float, cosine, sine)
         # TODO 6D: Convert the rotated result back to input_dtype and return.
         return x_rotated.to(input_dtype)
+
+
+def scaled_dot_product_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    mask: Tensor | None = None,
+) -> Tensor:
+    """Compute scaled dot-product attention over arbitrary leading axes.
+
+    Shapes:
+        query: ``(..., queries, d_k)``
+        key: ``(..., keys, d_k)``
+        value: ``(..., keys, d_v)``
+        mask: ``(..., queries, keys)`` where True means "may attend"
+        output: ``(..., queries, d_v)``
+    """
+    if query.shape[-1] != key.shape[-1]:
+        raise ValueError(
+            "Query and key must have the same final dimension, got "
+            f"{query.shape[-1]} and {key.shape[-1]}"
+        )
+    if key.shape[-2] != value.shape[-2]:
+        raise ValueError(
+            "Key and value must contain the same number of tokens, got "
+            f"{key.shape[-2]} and {value.shape[-2]}"
+        )
+
+    d_k = query.shape[-1]
+
+    # TODO 1: Transpose only the final two dimensions of key, then perform
+    # batched matrix multiplication with query. Do not use key.T because .T
+    # reverses all dimensions for tensors with more than two dimensions.
+    # Expected score shape: (..., queries, keys).
+    scores = torch.matmul(query, key.transpose(-2, -1))
+
+    # TODO 2: Divide every score by sqrt(d_k). This prevents the dot products
+    # from growing with the feature dimension and saturating softmax.
+    scores = scores / d_k**0.5
+    # TODO 3: If mask is not None, replace every score whose mask value is
+    # False with negative infinity. Inspect Tensor.masked_fill and remember
+    # that ~mask negates a boolean mask. Apply this before softmax.
+    if mask is not None:
+        scores = scores.masked_fill(~mask, float("-inf"))
+    # TODO 4: Apply softmax over the keys dimension, which is the final
+    # dimension of scores. Each query's weights should sum to one.
+    attention_weights = torch.softmax(scores, dim=-1)
+    # TODO 5: Multiply the attention weights by value. The keys dimension is
+    # contracted, producing (..., queries, d_v), and return the result.
+    return attention_weights @ value
+
+
+class MultiheadSelfAttention(nn.Module):
+    """
+    1. 生成Q/K/V
+    2. 拆分head
+    3. 应用RoPE
+    4. Attention
+    5. 合并head
+    6. 输出
+    """
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        theta: float | None = None,
+        max_seq_len: int | None = None,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.theta = theta
+        self.max_seq_len = max_seq_len
+
+        if d_model % num_heads != 0:
+            raise ValueError(
+                f"d_model ({d_model}) must be divisible by num_heads ({num_heads})"
+            )
+        self.d_k = d_model // num_heads
+
+        self.q_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.k_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.output_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+
+        if (theta is None) != (max_seq_len is None):
+            raise ValueError("theta and max_seq_len must be provided together")
+        self.rope = (
+            RotaryPositionalEmbedding(
+                theta=theta,
+                d_k=self.d_k,
+                max_seq_len=max_seq_len,
+                device=device,
+            )
+            if theta is not None and max_seq_len is not None
+            else None
+        )
+
+    def _split_heads(self, x):
+        """Split the final dimension into (num_heads, d_k) and transpose."""
+        reshaped = x.reshape(*x.shape[:-1], self.num_heads, self.d_k)  # (..., num_heads, d_k)
+        return reshaped.transpose(-3, -2)  # (..., num_heads, seq_len, d_k)
+
+    def _merge_heads(self, x):
+        """Transpose and merge the final two dimensions into d_model."""
+        transposed = x.transpose(-3, -2)  # (..., seq_len, num_heads, d_k)
+        return transposed.reshape(*transposed.shape[:-2], self.d_model)  # (..., seq_len, d_model)
+
+    def _make_causal_mask(self, seq_len: int, device: torch.device):
+        """Create a causal mask for self-attention."""
+        mask = torch.tril(torch.ones((seq_len, seq_len), device=device)).bool()
+        return mask  # shape: (seq_len, seq_len)
+
+    def forward(
+        self,
+        x: Tensor,
+        token_positions: Tensor | None = None,
+    ) -> Tensor:
+        """Compute multihead self-attention with RoPE.
+
+        Args:
+            x: Float[Tensor, " ... sequence_length d_model"]
+            token_positions: Long[Tensor, " ... sequence_length"]
+
+        Returns:
+            Float[Tensor, " ... sequence_length d_model"]: Output of MHA.
+        """
+        # 1. Generate Q/K/V
+        Q = self.q_proj(x)
+        K = self.k_proj(x)
+        V = self.v_proj(x)
+
+        # 2. Split heads
+        Q = self._split_heads(Q)
+        K = self._split_heads(K)
+        V = self._split_heads(V)
+
+        # 3. Apply RoPE when this attention module was configured to use it.
+        if self.rope is not None:
+            if token_positions is None:
+                token_positions = torch.arange(x.shape[-2], device=x.device)
+            Q = self.rope(Q, token_positions)
+            K = self.rope(K, token_positions)
+
+        # 4. Attention
+        seq_len = x.shape[-2]
+        causal_mask = self._make_causal_mask(seq_len, x.device)
+        output = scaled_dot_product_attention(Q, K, V, mask=causal_mask)
+
+        # 5. Merge heads
+        output = self._merge_heads(output)
+
+        # 6. Mix information from all heads in the model dimension.
+        return self.output_proj(output)
+
+
+class TransformerBlock(nn.Module):
+    """A single transformer block with self-attention and feed-forward layers."""
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,  # SwiGLU
+        theta: float | None = None,
+        max_seq_len: int | None = None,
+        eps: float = 1e-5, # RMSNorm
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.ln1 = RMSNorm(d_model, eps=eps, device=device, dtype=dtype)
+        self.attn = MultiheadSelfAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            theta=theta,
+            max_seq_len=max_seq_len,
+            device=device,
+            dtype=dtype
+        )
+        self.ln2 = RMSNorm(d_model, eps=eps, device=device, dtype=dtype)
+        self.ffn = SwiGLU(d_model, d_ff, device=device, dtype=dtype)
+        
+
+    def forward(self, x: Tensor, token_positions: Tensor | None = None) -> Tensor:
+        """Apply a transformer block to the input tensor."""
+        # Self-attention with residual connection
+        x_norm1 = self.ln1(x)
+        attn_output = self.attn(x_norm1, token_positions)
+        x = x + attn_output
+
+        # Feed-forward network with residual connection
+        x_norm2 = self.ln2(x)
+        ff_output = self.ffn(x_norm2)
+        x = x + ff_output
+
+        return x

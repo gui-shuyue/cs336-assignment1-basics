@@ -138,7 +138,9 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    from cs336_basics.model import scaled_dot_product_attention
+
+    return scaled_dot_product_attention(Q, K, V, mask)
 
 
 def run_multihead_self_attention(
@@ -172,7 +174,21 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from cs336_basics.model import MultiheadSelfAttention
+
+    attention = MultiheadSelfAttention(
+        d_model=d_model,
+        num_heads=num_heads,
+        device=q_proj_weight.device,
+        dtype=q_proj_weight.dtype,
+    )
+    with torch.no_grad():
+        attention.q_proj.weight.copy_(q_proj_weight)
+        attention.k_proj.weight.copy_(k_proj_weight)
+        attention.v_proj.weight.copy_(v_proj_weight)
+        attention.output_proj.weight.copy_(o_proj_weight)
+
+    return attention(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -212,7 +228,23 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from cs336_basics.model import MultiheadSelfAttention
+
+    attention = MultiheadSelfAttention(
+        d_model=d_model,
+        num_heads=num_heads,
+        theta=theta,
+        max_seq_len=max_seq_len,
+        device=q_proj_weight.device,
+        dtype=q_proj_weight.dtype,
+    )
+    with torch.no_grad():
+        attention.q_proj.weight.copy_(q_proj_weight)
+        attention.k_proj.weight.copy_(k_proj_weight)
+        attention.v_proj.weight.copy_(v_proj_weight)
+        attention.output_proj.weight.copy_(o_proj_weight)
+
+    return attention(in_features, token_positions)
 
 
 def run_rope(
@@ -315,7 +347,20 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    from cs336_basics.model import TransformerBlock
+
+    reference_tensor = next(iter(weights.values()))
+    block = TransformerBlock(
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        theta=theta,
+        max_seq_len=max_seq_len,
+        device=reference_tensor.device,
+        dtype=reference_tensor.dtype,
+    )
+    block.load_state_dict(weights)
+    return block(in_features)
 
 
 def run_transformer_lm(
