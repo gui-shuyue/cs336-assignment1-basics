@@ -538,3 +538,71 @@ class TransformerBlock(nn.Module):
         x = x + ff_output
 
         return x
+    
+
+class TransformerLM(nn.Module):
+
+    def __init__(
+        self,
+        vocab_size: int,
+        context_length: int,
+        d_model: int,
+        layer_num: int,
+        head_num: int,
+        d_ff: int,
+        theta:float,
+        eps: float = 1e-5,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.d_model = d_model
+        self.layer_num = layer_num
+        self.head_num = head_num
+        self.d_ff = d_ff
+        self.theta = theta
+        self.eps = eps
+
+        # Embedding layer for input tokens
+        self.token_embeddings = Embedding(vocab_size, d_model, device=device, dtype=dtype)
+
+        # Stack of transformer blocks
+        self.layers = nn.ModuleList([
+            TransformerBlock(
+                d_model=d_model,
+                num_heads=head_num,
+                d_ff=d_ff,
+                theta=theta,
+                max_seq_len=context_length,
+                eps=eps,
+                device=device,
+                dtype=dtype
+            ) for _ in range(layer_num)
+        ])
+
+        # Final layer normalization before output projection
+        self.ln_final = RMSNorm(d_model, eps=eps, device=device, dtype=dtype)
+
+        # Output projection to vocabulary size
+        self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
+
+    def forward(self, token_ids: Tensor) -> Tensor:
+        """
+        Args:
+            token_ids: (batch_size, context_length), embedding表的行索引
+        """
+        sequence_length = token_ids.shape[-1]
+        if sequence_length > self.context_length:
+            raise ValueError("Input sequence length exceeds the maximum context length.")
+
+        token_positions = torch.arange(sequence_length, device=token_ids.device)
+        
+        x = self.token_embeddings(token_ids)  # (batch_size, context_length, d_model)
+
+        for block in self.layers:
+            x = block(x, token_positions)  # (batch_size, context_length, d_model)
+        x = self.ln_final(x)  # (batch_size, context_length, d_model)
+        logits = self.lm_head(x)  # (batch_size, context_length, vocab_size)
+        return logits
