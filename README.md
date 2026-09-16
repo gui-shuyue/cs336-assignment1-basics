@@ -30,6 +30,54 @@ Initially, all tests should fail with `NotImplementedError`s.
 To connect your implementation to the tests, complete the
 functions in [./tests/adapters.py](./tests/adapters.py).
 
+## End-to-end training
+
+Train and save a TinyStories tokenizer:
+
+```sh
+uv run python -m cs336_basics.train_bpe \
+  data/TinyStoriesV2-GPT4-train.txt \
+  data/tinystories_tokenizer \
+  --vocab-size 10000 \
+  --special-token '<|endoftext|>'
+```
+
+Encode the train and validation splits as memory-mapped binary token arrays:
+
+```sh
+uv run python -m cs336_basics.prepare_data \
+  data/TinyStoriesV2-GPT4-train.txt data/tinystories_train.bin \
+  --vocab data/tinystories_tokenizer/vocab.json \
+  --merges data/tinystories_tokenizer/merges.txt
+
+uv run python -m cs336_basics.prepare_data \
+  data/TinyStoriesV2-GPT4-valid.txt data/tinystories_valid.bin \
+  --vocab data/tinystories_tokenizer/vocab.json \
+  --merges data/tinystories_tokenizer/merges.txt
+```
+
+Start training on a CUDA server:
+
+```sh
+uv run python -m cs336_basics.train \
+  --train-data data/tinystories_train.bin \
+  --valid-data data/tinystories_valid.bin \
+  --checkpoint checkpoints/tinystories.pt \
+  --device cuda --amp-dtype bfloat16 --compile
+```
+
+Resume by adding `--resume checkpoints/tinystories.pt`. The model configuration
+is written next to the checkpoint as a JSON file. Generate text after training:
+
+```sh
+uv run python -m cs336_basics.generate \
+  --checkpoint checkpoints/tinystories.pt \
+  --config checkpoints/tinystories.json \
+  --vocab data/tinystories_tokenizer/vocab.json \
+  --merges data/tinystories_tokenizer/merges.txt \
+  --prompt 'Once upon a time'
+```
+
 ### Download data
 Download the TinyStories data and a subsample of OpenWebText
 
